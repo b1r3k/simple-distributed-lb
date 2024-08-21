@@ -13,7 +13,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from .pubsub import PubSubMessage, RedisKeyspaceListener, setup_redis, teardown_redis
+from .pubsub import (
+    PubSubMessage,
+    RedisKeyspaceCommand,
+    RedisKeyspaceListener,
+    setup_redis,
+    teardown_redis,
+)
 from .targets import Host, RoundRobinTargets
 
 
@@ -168,7 +174,9 @@ async def app_startup():
     http_client = httpx.AsyncClient(follow_redirects=True, limits=limits, timeout=timeout)
     lb_targets = RoundRobinTargets()
     redis_client = setup_redis(settings.REDIS_DSN)
-    redis_keyspace = RedisKeyspaceListener(redis_client, callbacks={"sadd": handle_registration_notification})
+    redis_keyspace = RedisKeyspaceListener(
+        redis_client, callbacks={RedisKeyspaceCommand.SADD: handle_registration_notification}
+    )
     await redis_keyspace.subscribe()
     # initialize for the first time since keyspace notifications are not triggered if redis operation did not modify
     # value for given key

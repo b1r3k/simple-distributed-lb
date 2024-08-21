@@ -1,11 +1,16 @@
 import asyncio
 import logging
+from enum import StrEnum, auto
 from typing import Awaitable, Callable, Dict
 
 import pydantic
 import redis.asyncio as aioredis
 
 logger = logging.getLogger()
+
+
+class RedisKeyspaceCommand(StrEnum):
+    SADD = auto()
 
 
 class PubSubMessage(pydantic.BaseModel):
@@ -28,7 +33,7 @@ class PubSubMessage(pydantic.BaseModel):
             type=message["type"],
             channel=channel,
             pattern=message["pattern"].decode("utf-8"),
-            data=message["data"].decode("utf-8"),
+            data=message["data"].decode("utf-8").lower(),
             redis_key=channel.split(":")[-1],
         )
 
@@ -47,7 +52,7 @@ class RedisKeyspaceListener:
     def __init__(
         self,
         redis_client: aioredis.Redis,
-        callbacks: Dict[str, Callable[[PubSubMessage], Awaitable]],
+        callbacks: Dict[RedisKeyspaceCommand, Callable[[PubSubMessage], Awaitable]],
         *,
         key_pattern: str = "slb_",
         database: int = 0,
@@ -74,21 +79,23 @@ class RedisKeyspaceListener:
         try:
             while True:
                 message = await self.channel.get_message(ignore_subscribe_messages=True)
-                if message is not None:
-                    logger.info("Received message: %s", message)
-                    try:
-                        pubsub_message = PubSubMessage.from_redis_message(message)
-                    except pydantic.ValidationError:
-                        continue
-                    try:
-                        op = pubsub_message.data
-                        callback = self.callbacks.get(op)
-                        if callback:
-                            await callback(pubsub_message)
-                    except Exception:
-                        logger.exception("Error in keyspace listener callback")
+                logger.debug("Received message: %s", message)
+                try:
+                    pubsub_message = PubSubMessage.from_redis_message(message)
+                except pydantic.ValidationError:
+                    continue
+                try:
+                    op = RedisKeyspaceCommand(pubsub_message.data)
+                    callback = self.callbacks.get(op)
+                    if callback:
+                        await callback(pubsub_message)
+                except ValueError:
+                    # ignore unknown operations
+                    continue
+                except Exception:
+                    logger.exception("Unhandled error in keyspace listener callback")
         except asyncio.CancelledError:
-            logger.info("Keyspace listener cancelled")
+            logger.debug("Keyspace listener cancelled")
 
     async def aclose(self):
         if self.listener is not None:
