@@ -1,48 +1,64 @@
-# Modern python app boilerplate
+# simple distributed load balancer
 
-Included in this boilerplate:
+companion repository for blog:
 
- - pyenv for python version management
- - [poetry](https://python-poetry.org/) for dependency management integrated with pyenv
- - [pre-commit](https://pre-commit.com/) for linting and formatting
- - [pytest](https://docs.pytest.org/en/stable/) for testing
- - [black]() for formatting
- - [flake8]() for linting
- - [isort]() for sorting imports
- - [mypy]() for static type checking
- - virtualenv created by poetry resides in `.venv` folder
+## Problem description
 
+Create a load balancing server to handle HTTP requests and distribute them to microservices. The server should offer the following endpoints:
 
-## How to start
+    /register: Receives parameters for URL path, IP address, and port. Upon receiving this request, the load balancer will start sending requests to the corresponding microservice.
 
-1. Make sure you have python required interpreter installed in pyenv e.g.
-2. Rename project:
- - Rename app folder to your app name if needed (`mv simple_distributed_lb new_simple_distributed_lb`) and then:
+Requests to other endpoints are forwarded to microservices based on a Round Robin load balancing scheme. Replies are then sent back to the client.
 
-       find ./ -type f -not -path "./.git/*" -exec sed -i 's/simple_distributed_lb/new_simple_distributed_lb/g' {} \;
-       find ./ -type f -not -path "./.git/*" -exec sed -i 's/simple-distributed-lb/new-simple-distributed-lb/g' {} \;
- - or use `make rename-project NEW_APP_NAME=new_simple_distributed_lb` to do it for you
+Example:
 
-3. `make install`
-4. `make test`
-5. Make sure it's working: `poetry run app-cli "Developer"`
-6. Optionally, squeeze history into one commit: `git reset $(git commit-tree HEAD^{tree} -m "Initial commit")`
+Microservice A registers: http://<load balancer>/register "/test", ip address, port
+Microservice B registers: http://<load balancer>/register "/test2", ip address, port
+Microservice C registers: http://<load balancer>/register "/test", ip address, port
+Microservice D registers: http://<load balancer>/register "/test", ip address, port
 
-## Other useful commands
+When a client calls http://<load balancer>/test, the request will be forwarded to either A, C, or D.
 
- - Check current poetry virtualenv and change it
+## Howto
 
-```bash
-   $ poetry env info
-   $ poetry env list
-   $ poetry env remove /home/PATH/bin/python
-   $ make install
-```
+### Run
 
- - Cherry-pick commit from repository cloned from this one:
+1. Make sure you have poetry installed and pyenv wouldn't hurt too
+2. Install dependencies: `make install`
+3. Start async based solution: `make run-async`
+
+### Test
+
+1. Register target
 
 ```bash
-   $ git remote add projectB /home/you/projectB
-   $ git fetch projectB
-   $ git cherry-pick <commit from projectB repo>
+curl -i -L -X POST \
+   -H "Content-Type:application/json" \
+   -d \
+'[{
+  "ip_address": "99.83.207.200",
+  "port": 80
+}]' \
+ 'http://localhost:8000/register'
 ```
+
+2. Send request
+
+```bash
+curl -i -L -X GET 'http://localhost:8000/hello/world'
+```
+
+### Develop
+
+You can start docker compose setup with two load balancers, two upstream servers, DNS server and redis:
+
+    $ docker compose up
+
+Rebuild the docker images for docker compose:
+
+    $ docker compose up --build --force-recreate
+
+Attach to the running container:
+
+    $ docker ps
+    $ docker exec -it <container_id> /bin/bash

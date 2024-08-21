@@ -1,0 +1,195 @@
+version: '3.9'
+services:
+  loadbalancer1:
+    build:
+      context: .
+      args:
+        APP_PORT: 5000
+      dockerfile: Dockerfile
+    depends_on:
+      redis_init:
+        condition: service_completed_successfully
+      coredns:
+        condition: service_started
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.2
+    environment:
+      APP_NAME: starlette_lb
+      REDIS_DSN: redis://redis:6379/0
+    healthcheck:
+      test: "curl --silent --fail http://localhost:5000/healthcheck > /dev/null || exit 1"
+      interval: 10s
+      retries: 3
+      start_period: 3s
+      timeout: 1s
+    stop_grace_period: 1s
+  loadbalancer2:
+    build:
+      context: .
+      args:
+        APP_PORT: 5000
+      dockerfile: Dockerfile
+    depends_on:
+      redis_init:
+        condition: service_completed_successfully
+      coredns:
+        condition: service_started
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.3
+    environment:
+      APP_NAME: starlette_lb
+      REDIS_DSN: redis://redis:6379/0
+    healthcheck:
+      test: "curl --silent --fail http://localhost:5000/healthcheck > /dev/null || exit 1"
+      interval: 10s
+      retries: 3
+      start_period: 3s
+      timeout: 1s
+    stop_grace_period: 1s
+  upstream1:
+    build:
+      context: .
+      args:
+        APP_PORT: 5000
+      dockerfile: Dockerfile
+    depends_on:
+      loadbalancer1:
+        condition: service_healthy
+      loadbalancer2:
+        condition: service_healthy
+      coredns:
+        condition: service_started
+      redis_init:
+        condition: service_completed_successfully
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.20
+    environment:
+      LOADBALANCER_HOST: loadbalancer.local
+      LOADBALANCER_PORT: 5000
+    dns:
+      - 172.253.253.10
+    volumes:
+      - ./etc/docker-compose/demo_upstream_server:/root
+    command: /root/start_upstream.sh
+    stop_grace_period: 1s
+  upstream2:
+    build:
+      context: .
+      args:
+        APP_PORT: 5000
+      dockerfile: Dockerfile
+    depends_on:
+      loadbalancer1:
+        condition: service_healthy
+      loadbalancer2:
+        condition: service_healthy
+      coredns:
+        condition: service_started
+      redis_init:
+        condition: service_completed_successfully
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.21
+    environment:
+      LOADBALANCER_HOST: loadbalancer.local
+      LOADBALANCER_PORT: 5000
+    dns:
+      - 172.253.253.10
+    volumes:
+      - ./etc/docker-compose/demo_upstream_server:/root
+    command: /root/start_upstream.sh
+    stop_grace_period: 1s
+  coredns:
+    image: coredns/coredns:latest
+    container_name: coredns
+    ports:
+      - "8053:53/udp"
+    volumes:
+      - ./etc/docker-compose/coredns/Corefile:/Corefile
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.10
+    restart: unless-stopped
+    command: ["-conf", "/Corefile"]
+    stop_grace_period: 1s
+  dns_debug:
+    image: nicolaka/netshoot
+    networks:
+      - lbnet
+    depends_on:
+      coredns:
+        condition: service_started
+    environment:
+      LOADBALANCER_HOST: loadbalancer.local
+    dns:
+      - 172.253.253.10
+    command: /bin/sh -c "for i in 1 2 3; do nslookup loadbalancer.local; sleep 1; done"
+  redis_init:
+    image: redis:5.0-alpine
+    networks:
+      - lbnet
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: redis-cli -h redis config set notify-keyspace-events KEA
+  redis_observer:
+    image: redis:5.0-alpine
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.13
+    depends_on:
+      redis:
+        condition: service_healthy
+      redis_init:
+        condition: service_completed_successfully
+    command: redis-cli -h redis --csv psubscribe '__key*__:*'
+    stop_grace_period: 1s
+  redis:
+    image: redis:5.0-alpine
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.11
+    ports:
+      - "6379:6379"
+    restart: always
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      interval: 10s
+      retries: 3
+      start_period: 3s
+      timeout: 1s
+    stop_grace_period: 3s
+  demo_client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      loadbalancer1:
+        condition: service_healthy
+      loadbalancer2:
+        condition: service_healthy
+      upstream1:
+        condition: service_started
+      upstream2:
+        condition: service_started
+    dns:
+      - 172.253.253.10
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.100
+    environment:
+      LOADBALANCER_HOST: loadbalancer.local
+      LOADBALANCER_PORT: 5000
+    volumes:
+      - ./etc/docker-compose/demo_upstream_server:/root
+    command: /root/demo_client.sh
+    stop_grace_period: 1s
+networks:
+  lbnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.253.253.0/24

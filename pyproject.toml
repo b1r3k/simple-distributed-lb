@@ -8,6 +8,13 @@ packages = [{include = "simple_distributed_lb"}]
 
 [tool.poetry.dependencies]
 python = "^3.11"
+starlette = "^0.38.2"
+uvicorn = "^0.30.6"
+orjson = "^3.10.7"
+pydantic = "^2.8.2"
+pydantic-settings = "^2.4.0"
+redis = "^5.0.8"
+httpx = "^0.27.0"
 
 [build-system]
 requires = ["poetry-core"]
@@ -22,7 +29,7 @@ mypy = "^1.0.1"
 isort = "^5.12.0"
 
 [tool.poetry.scripts]
-app-cli = 'simple_distributed_lb:main.cli'
+demo_upstream_server = 'simple_distributed_lb:demo_upstream_server.run'
 
 [tool.pytest.ini_options]
 minversion = "7.0"

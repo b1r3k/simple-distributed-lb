@@ -1,0 +1,9 @@
+.:53 {
+    log
+    errors
+    hosts {
+        172.253.253.2 loadbalancer.local
+        172.253.253.3 loadbalancer.local
+        fallthrough
+    }
+}
