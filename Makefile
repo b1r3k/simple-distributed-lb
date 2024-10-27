@@ -2,7 +2,7 @@ APP_VERSION := $(shell grep -oP '(?<=^version = ")[^"]*' pyproject.toml)
 APP_DIR := simple_distributed_lb
 NPROCS = $(shell grep -c 'processor' /proc/cpuinfo)
 MAKEFLAGS += -j$(NPROCS)
-PYTEST_FLAGS := --failed-first -x
+PYTEST_FLAGS := --failed-first -x --durations=1 --durations-min=1.0 --timeout=1
 
 
 install:
@@ -10,10 +10,15 @@ install:
 	test -d .git/hooks/pre-commit || poetry run pre-commit install
 
 test:
-	poetry run pytest ${PYTEST_FLAGS}
+	poetry run pytest ${PYTEST_FLAGS} tests/unit
+
+e2e-test:
+	poetry export --with dev --without-hashes --format=requirements.txt > requirements-dev.txt
+	docker compose build e2e-tests
+	docker compose run --rm e2e-tests
 
 testloop:
-	watch -n 3 poetry run pytest ${PYTEST_FLAGS}
+	watch -n 3 poetry run pytest ${PYTEST_FLAGS} tests/unit
 
 lint-fix:
 	poetry run isort --profile black .
@@ -22,16 +27,6 @@ lint-fix:
 lint-check:
 	poetry run flake8 ${APP_DIR}
 	poetry run mypy .
-
-
-rename-project: NEW_APP_DIR :=$(shell echo ${NEW_APP_NAME} | tr '-' '_')
-rename-project: APP_NAME := $(shell echo ${APP_DIR} | tr '_' '-')
-rename-project:
-	@echo "Renaming project ${APP_NAME} to ${NEW_APP_NAME}"
-	@echo "Renaming directories ${APP_DIR} to ${NEW_APP_DIR}"
-	mv ${APP_DIR} ${NEW_APP_DIR}
-	find ./ -type f -not -path "./.git/*" -exec sed -i 's/${APP_DIR}/${NEW_APP_DIR}/g' {} \;
-	find ./ -type f -not -path "./.git/*" -exec sed -i 's/${APP_NAME}/${NEW_APP_NAME}/g' {} \;
 
 
 lint: lint-fix lint-check

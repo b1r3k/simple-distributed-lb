@@ -1,9 +1,14 @@
 .:53 {
-    log
+    log . {
+        class denial
+        class error
+    }
     errors
     hosts {
         172.253.253.2 loadbalancer.local
         172.253.253.3 loadbalancer.local
         fallthrough
     }
+    # allow to access external DNS service
+    forward . 8.8.8.8 8.8.4.4
 }

@@ -100,6 +100,7 @@ async def handle_registration(req: Request) -> Response:
 
 
 async def healthcheck(_: Request) -> Response:
+    logger.debug("Healthcheck OK")
     return Response(status_code=200, content="OK")
 
 

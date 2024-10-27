@@ -1,107 +1,5 @@
 version: '3.9'
 services:
-  loadbalancer1:
-    build:
-      context: .
-      args:
-        APP_PORT: 5000
-      dockerfile: Dockerfile
-    depends_on:
-      redis_init:
-        condition: service_completed_successfully
-      coredns:
-        condition: service_started
-    networks:
-      lbnet:
-        ipv4_address: 172.253.253.2
-    environment:
-      APP_NAME: starlette_lb
-      REDIS_DSN: redis://redis:6379/0
-    healthcheck:
-      test: "curl --silent --fail http://localhost:5000/healthcheck > /dev/null || exit 1"
-      interval: 10s
-      retries: 3
-      start_period: 3s
-      timeout: 1s
-    stop_grace_period: 1s
-  loadbalancer2:
-    build:
-      context: .
-      args:
-        APP_PORT: 5000
-      dockerfile: Dockerfile
-    depends_on:
-      redis_init:
-        condition: service_completed_successfully
-      coredns:
-        condition: service_started
-    networks:
-      lbnet:
-        ipv4_address: 172.253.253.3
-    environment:
-      APP_NAME: starlette_lb
-      REDIS_DSN: redis://redis:6379/0
-    healthcheck:
-      test: "curl --silent --fail http://localhost:5000/healthcheck > /dev/null || exit 1"
-      interval: 10s
-      retries: 3
-      start_period: 3s
-      timeout: 1s
-    stop_grace_period: 1s
-  upstream1:
-    build:
-      context: .
-      args:
-        APP_PORT: 5000
-      dockerfile: Dockerfile
-    depends_on:
-      loadbalancer1:
-        condition: service_healthy
-      loadbalancer2:
-        condition: service_healthy
-      coredns:
-        condition: service_started
-      redis_init:
-        condition: service_completed_successfully
-    networks:
-      lbnet:
-        ipv4_address: 172.253.253.20
-    environment:
-      LOADBALANCER_HOST: loadbalancer.local
-      LOADBALANCER_PORT: 5000
-    dns:
-      - 172.253.253.10
-    volumes:
-      - ./etc/docker-compose/demo_upstream_server:/root
-    command: /root/start_upstream.sh
-    stop_grace_period: 1s
-  upstream2:
-    build:
-      context: .
-      args:
-        APP_PORT: 5000
-      dockerfile: Dockerfile
-    depends_on:
-      loadbalancer1:
-        condition: service_healthy
-      loadbalancer2:
-        condition: service_healthy
-      coredns:
-        condition: service_started
-      redis_init:
-        condition: service_completed_successfully
-    networks:
-      lbnet:
-        ipv4_address: 172.253.253.21
-    environment:
-      LOADBALANCER_HOST: loadbalancer.local
-      LOADBALANCER_PORT: 5000
-    dns:
-      - 172.253.253.10
-    volumes:
-      - ./etc/docker-compose/demo_upstream_server:/root
-    command: /root/start_upstream.sh
-    stop_grace_period: 1s
   coredns:
     image: coredns/coredns:latest
     container_name: coredns
@@ -113,20 +11,156 @@ services:
       lbnet:
         ipv4_address: 172.253.253.10
     restart: unless-stopped
-    command: ["-conf", "/Corefile"]
+    command: [ "-conf", "/Corefile" ]
     stop_grace_period: 1s
-  dns_debug:
-    image: nicolaka/netshoot
+  loadbalancer1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redis_init:
+        condition: service_completed_successfully
+      coredns:
+        condition: service_started
     networks:
-      - lbnet
+      lbnet:
+        ipv4_address: 172.253.253.2
+    dns:
+      - 172.253.253.10
+    environment:
+      APP_NAME: starlette_lb
+      APP_PORT: 5000
+      REDIS_DSN: redis://redis:6379/0
+      LOG_LEVEL: ERROR
+      UVICORN_LOG_LEVEL: error
+    healthcheck:
+      test: "curl --silent --fail http://localhost:5000/healthcheck > /dev/null || exit 1"
+      interval: 10s
+      retries: 3
+      start_period: 30s
+      timeout: 1s
+    volumes:
+      - ./simple_distributed_lb:/app/simple_distributed_lb
+      - ./poetry.lock:/app/poetry.lock
+      - ./poetry.toml:/app/poetry.toml
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./README.md:/app/README.md
+      - ./etc/docker-compose/entrypoints:/app/entrypoints
+    command: /app/entrypoints/dev-uvicorn.sh
+    stop_grace_period: 1s
+  loadbalancer2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      redis_init:
+        condition: service_completed_successfully
+      coredns:
+        condition: service_started
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.3
+    dns:
+      - 172.253.253.10
+    environment:
+      APP_NAME: starlette_lb
+      APP_PORT: 5000
+      REDIS_DSN: redis://redis:6379/0
+      LOG_LEVEL: ERROR
+      UVICORN_LOG_LEVEL: error
+    healthcheck:
+      test: "curl --silent --fail http://localhost:5000/healthcheck > /dev/null || exit 1"
+      interval: 10s
+      retries: 3
+      start_period: 30s
+      timeout: 1s
+    volumes:
+      - ./simple_distributed_lb:/app/simple_distributed_lb
+      - ./poetry.lock:/app/poetry.lock
+      - ./poetry.toml:/app/poetry.toml
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./README.md:/app/README.md
+      - ./etc/docker-compose/entrypoints:/app/entrypoints
+    command: /app/entrypoints/dev-uvicorn.sh
+    stop_grace_period: 1s
+  upstream1:
+    build:
+      context: .
+      args:
+        APP_PORT: 5000
+      dockerfile: Dockerfile
     depends_on:
       coredns:
         condition: service_started
-    environment:
-      LOADBALANCER_HOST: loadbalancer.local
+      redis_init:
+        condition: service_completed_successfully
+      loadbalancer1:
+        condition: service_healthy
+      loadbalancer2:
+        condition: service_healthy
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.20
     dns:
       - 172.253.253.10
-    command: /bin/sh -c "for i in 1 2 3; do nslookup loadbalancer.local; sleep 1; done"
+    environment:
+      LOADBALANCER_HOST: loadbalancer1
+      LOADBALANCER_PORT: 5000
+      LOG_LEVEL: ERROR
+    volumes:
+      - ./simple_distributed_lb:/app/simple_distributed_lb
+      - ./poetry.lock:/app/poetry.lock
+      - ./poetry.toml:/app/poetry.toml
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./README.md:/app/README.md
+      - ./etc/docker-compose/entrypoints:/app/entrypoints
+    command: /app/entrypoints/e2e-upstream.sh
+    healthcheck:
+      test: "curl --silent --fail http://localhost:5000/healthcheck > /dev/null || exit 1"
+      interval: 10s
+      retries: 3
+      start_period: 15s
+      timeout: 1s
+    stop_grace_period: 1s
+  upstream2:
+    build:
+      context: .
+      args:
+        APP_PORT: 5000
+      dockerfile: Dockerfile
+    depends_on:
+      coredns:
+        condition: service_started
+      redis_init:
+        condition: service_completed_successfully
+      loadbalancer1:
+        condition: service_healthy
+      loadbalancer2:
+        condition: service_healthy
+    networks:
+      lbnet:
+        ipv4_address: 172.253.253.21
+    dns:
+      - 172.253.253.10
+    environment:
+      LOADBALANCER_HOST: loadbalancer2
+      LOADBALANCER_PORT: 5000
+      LOG_LEVEL: ERROR
+    volumes:
+      - ./simple_distributed_lb:/app/simple_distributed_lb
+      - ./poetry.lock:/app/poetry.lock
+      - ./poetry.toml:/app/poetry.toml
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./README.md:/app/README.md
+      - ./etc/docker-compose/entrypoints:/app/entrypoints
+    command: /app/entrypoints/e2e-upstream.sh
+    healthcheck:
+      test: "curl --silent --fail http://localhost:5000/healthcheck > /dev/null || exit 1"
+      interval: 10s
+      retries: 3
+      start_period: 15s
+      timeout: 1s
+    stop_grace_period: 1s
   redis_init:
     image: redis:5.0-alpine
     networks:
@@ -162,7 +196,7 @@ services:
       start_period: 3s
       timeout: 1s
     stop_grace_period: 3s
-  demo_client:
+  e2e-tests:
     build:
       context: .
       dockerfile: Dockerfile
@@ -172,9 +206,9 @@ services:
       loadbalancer2:
         condition: service_healthy
       upstream1:
-        condition: service_started
+        condition: service_healthy
       upstream2:
-        condition: service_started
+        condition: service_healthy
     dns:
       - 172.253.253.10
     networks:
@@ -183,9 +217,16 @@ services:
     environment:
       LOADBALANCER_HOST: loadbalancer.local
       LOADBALANCER_PORT: 5000
+      LOG_LEVEL: ERROR
     volumes:
-      - ./etc/docker-compose/demo_upstream_server:/root
-    command: /root/demo_client.sh
+      - ./simple_distributed_lb:/app/simple_distributed_lb
+      - ./tests:/app/tests
+      - ./poetry.lock:/app/poetry.lock
+      - ./poetry.toml:/app/poetry.toml
+      - ./pyproject.toml:/app/pyproject.toml
+      - ./README.md:/app/README.md
+      - ./etc/docker-compose/entrypoints:/app/entrypoints
+    command: /app/entrypoints/e2e-tests.sh
     stop_grace_period: 1s
 networks:
   lbnet:

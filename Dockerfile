@@ -19,15 +19,14 @@ RUN addgroup $GROUP && adduser \
     --uid 1000 \
     $USER
 
-RUN python -m venv /app/.venv
-
-COPY . /app
 WORKDIR /app
-
-RUN rm -rf /app/dist && poetry build
-RUN . /app/.venv/bin/activate && pip install /app/dist/simple*.whl
+RUN chmod -R 777 /app
+# helps speed up docker compose run but requires a rebuild if the requirements change
+COPY ./requirements-dev.txt /app
 
 EXPOSE $APP_PORT
 USER $USER
+
+RUN python -m venv /app/.venv && . /app/.venv/bin/activate && pip install -r /app/requirements.txt
 
 CMD . /app/.venv/bin/activate && uvicorn --host 0.0.0.0 --port ${APP_PORT} --timeout-keep-alive 61 --lifespan on --factory simple_distributed_lb.starlette_based:create_app

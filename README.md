@@ -1,6 +1,6 @@
 # simple distributed load balancer
 
-companion repository for blog:
+companion repository for blog post:
 
 ## Problem description
 

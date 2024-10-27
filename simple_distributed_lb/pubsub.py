@@ -1,10 +1,11 @@
 import asyncio
 import logging
 from enum import StrEnum, auto
-from typing import Awaitable, Callable, Dict
+from typing import AsyncGenerator, Awaitable, Callable, Dict, List
 
 import pydantic
 import redis.asyncio as aioredis
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 logger = logging.getLogger()
 
@@ -27,15 +28,31 @@ class PubSubMessage(pydantic.BaseModel):
 
         {type='pmessage' channel=b'__keyspace@0__:slb_/hello' pattern=b'__keyspace@0__:slb_*' data=b'sadd'}
         """
+        errors: List[InitErrorDetails] = []
         # Convert bytes to string for each item in the message
-        channel = message["channel"].decode("utf-8")
-        return cls(
-            type=message["type"],
-            channel=channel,
-            pattern=message["pattern"].decode("utf-8"),
-            data=message["data"].decode("utf-8").lower(),
-            redis_key=channel.split(":")[-1],
-        )
+        try:
+            message_type = message["type"]
+            channel = message["channel"].decode("utf-8")
+            message_pattern = message["pattern"].decode("utf-8")
+            message_data = message["data"].decode("utf-8").lower()
+            redis_key = channel.split(":")[-1]
+        except (AttributeError, KeyError, TypeError):
+            logger.error("Invalid message format: %s", message)
+            errors.append(
+                InitErrorDetails(
+                    loc=("message parser",),
+                    type=PydanticCustomError("invalid_message", "Invalid message format"),
+                    input="message",
+                    ctx={"message": message},
+                )
+            )
+        else:
+            return cls(
+                type=message_type, channel=channel, pattern=message_pattern, data=message_data, redis_key=redis_key
+            )
+        finally:
+            if errors:
+                raise pydantic.ValidationError.from_exception_data(title="parsing error", line_errors=errors)
 
 
 def setup_redis(url: str) -> aioredis.Redis:
@@ -64,26 +81,34 @@ class RedisKeyspaceListener:
         self.keyspace = self.KEYSPACE.format(db_name=self.database)
         self.channel = None
         self.listener = None
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     async def subscribe(self) -> asyncio.Task:
         if self.channel is None:
             self.channel = self.redis_client.pubsub()
         pattern = f"{self.keyspace}:{self.key_pattern}*"
-        logger.info("Subscribing to keyspace on: %s", pattern)
+        self.logger.info("Subscribing to keyspace on: %s", pattern)
         await self.channel.psubscribe(pattern)
         self.listener = asyncio.create_task(self._listen())
         return self.listener
 
-    async def _listen(self):
-        logger.info("Starting keyspace notifications listener")
-        try:
-            while True:
-                message = await self.channel.get_message(ignore_subscribe_messages=True)
-                logger.debug("Received message: %s", message)
+    async def _get_message(self) -> AsyncGenerator[PubSubMessage, None]:
+        while True:
+            message = await self.channel.get_message(ignore_subscribe_messages=True)
+            self.logger.debug("Received message: %s", message)
+            if message:
                 try:
                     pubsub_message = PubSubMessage.from_redis_message(message)
-                except pydantic.ValidationError:
-                    continue
+                    yield pubsub_message
+                except pydantic.ValidationError as e:
+                    self.logger.error("Invalid PubSub message: %s", e)
+            else:
+                await asyncio.sleep(1)
+
+    async def _listen(self):
+        self.logger.info("Starting main loop")
+        try:
+            async for pubsub_message in self._get_message():
                 try:
                     op = RedisKeyspaceCommand(pubsub_message.data)
                     callback = self.callbacks.get(op)
@@ -93,13 +118,16 @@ class RedisKeyspaceListener:
                     # ignore unknown operations
                     continue
                 except Exception:
-                    logger.exception("Unhandled error in keyspace listener callback")
+                    self.logger.exception("Unhandled error in callback")
         except asyncio.CancelledError:
-            logger.debug("Keyspace listener cancelled")
+            self.logger.debug("main loop cancelled")
+        except (StopAsyncIteration, RuntimeError):
+            self.logger.info("no more messages?")
+            return
 
     async def aclose(self):
         if self.listener is not None:
             self.listener.cancel()
         await self.channel.punsubscribe()
         await self.channel.close()
-        logger.info("Keyspace listener closed")
+        self.logger.info("listener closed")
