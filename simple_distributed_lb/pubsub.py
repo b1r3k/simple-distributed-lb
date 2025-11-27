@@ -7,6 +7,8 @@ import pydantic
 import redis.asyncio as aioredis
 from pydantic_core import InitErrorDetails, PydanticCustomError
 
+from simple_distributed_lb.retry import RetryMechanism
+
 logger = logging.getLogger()
 
 
@@ -71,6 +73,7 @@ class RedisKeyspaceListener:
         redis_client: aioredis.Redis,
         callbacks: Dict[RedisKeyspaceCommand, Callable[[PubSubMessage], Awaitable]],
         *,
+        retry_mechanism: RetryMechanism = None,
         key_pattern: str = "slb_",
         database: int = 0,
     ):
@@ -82,6 +85,7 @@ class RedisKeyspaceListener:
         self.channel = None
         self.listener = None
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.retry_mechanism = retry_mechanism or RetryMechanism()
 
     async def subscribe(self) -> asyncio.Task:
         if self.channel is None:
@@ -89,8 +93,6 @@ class RedisKeyspaceListener:
         pattern = f"{self.keyspace}:{self.key_pattern}*"
         self.logger.info("Subscribing to keyspace on: %s", pattern)
         await self.channel.psubscribe(pattern)
-        self.listener = asyncio.create_task(self._listen())
-        return self.listener
 
     async def _get_message(self) -> AsyncGenerator[PubSubMessage, None]:
         while True:
@@ -107,27 +109,43 @@ class RedisKeyspaceListener:
 
     async def _listen(self):
         self.logger.info("Starting main loop")
-        try:
-            async for pubsub_message in self._get_message():
-                try:
-                    op = RedisKeyspaceCommand(pubsub_message.data)
-                    callback = self.callbacks.get(op)
-                    if callback:
-                        await callback(pubsub_message)
-                except ValueError:
-                    # ignore unknown operations
-                    continue
-                except Exception:
-                    self.logger.exception("Unhandled error in callback")
-        except asyncio.CancelledError:
-            self.logger.debug("main loop cancelled")
-        except (StopAsyncIteration, RuntimeError):
-            self.logger.info("no more messages?")
-            return
+        async for pubsub_message in self._get_message():
+            try:
+                op = RedisKeyspaceCommand(pubsub_message.data)
+                callback = self.callbacks.get(op)
+                if callback:
+                    await callback(pubsub_message)
+            except ValueError:
+                # ignore unknown operations
+                continue
+            except Exception:
+                self.logger.exception("Unhandled error in callback")
+
+    async def run(self):
+        """Main loop to run the listener"""
+        for attempt_delay in self.retry_mechanism:
+            try:
+                await self.subscribe()
+                await self._listen()
+            except (aioredis.ConnectionError, aioredis.TimeoutError) as e:
+                self.logger.warning("Redis connection error: %s. Reconnecting in %s", e, attempt_delay)
+                await asyncio.sleep(attempt_delay)
+            except asyncio.CancelledError:
+                self.logger.debug("main loop cancelled")
+            except (StopAsyncIteration, RuntimeError):
+                self.logger.info("no more messages?")
+            finally:
+                await self.aclose()
 
     async def aclose(self):
         if self.listener is not None:
             self.listener.cancel()
-        await self.channel.punsubscribe()
-        await self.channel.close()
+        try:
+            await self.channel.punsubscribe()
+        except Exception:
+            pass
+        try:
+            await self.channel.close()
+        except Exception:
+            pass
         self.logger.info("listener closed")

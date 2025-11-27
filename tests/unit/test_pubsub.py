@@ -1,3 +1,4 @@
+import asyncio
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock
 
@@ -5,6 +6,7 @@ import pydantic
 import redis.asyncio as aioredis
 
 from simple_distributed_lb.pubsub import PubSubMessage, RedisKeyspaceListener
+from simple_distributed_lb.retry import RetryMechanism
 
 
 class TestPubSubMessage(TestCase):
@@ -51,3 +53,37 @@ class TestRedisKeyspaceListener(IsolatedAsyncioTestCase):
         await inst.subscribe()
         self.redis_mock.pubsub.assert_called_once()
         self.channel.psubscribe.assert_awaited_once_with("__keyspace@0__:slb_*")
+
+    async def test_keyspace_listener_connection_error(self):
+        self.channel.psubscribe.side_effect = aioredis.ConnectionError("Connection lost")
+        inst = RedisKeyspaceListener(redis_client=self.redis_mock, callbacks={}, key_pattern="slb_", database=0)
+        with self.assertRaises(aioredis.ConnectionError):
+            await inst.subscribe()
+        self.assertEqual(self.channel.psubscribe.call_count, 1)
+
+    async def test_keyspace_listener_timeout_error(self):
+        self.channel.psubscribe.side_effect = aioredis.TimeoutError("Operation timed out")
+        inst = RedisKeyspaceListener(redis_client=self.redis_mock, callbacks={}, key_pattern="slb_", database=0)
+
+        with self.assertRaises(aioredis.TimeoutError):
+            await inst.subscribe()
+        self.assertEqual(self.channel.psubscribe.call_count, 1)
+
+    async def test_keyspace_listener_abrupt_disconnection(self):
+        self.channel.get_message.side_effect = [
+            self.channel_message,
+            aioredis.ConnectionError("Connection lost"),
+            aioredis.TimeoutError("Operation timed out"),
+            aioredis.ConnectionError("Connection lost"),
+            asyncio.CancelledError(),
+        ]
+        retry = RetryMechanism(max_wait=0.01)
+        inst = RedisKeyspaceListener(
+            redis_client=self.redis_mock, callbacks={}, key_pattern="slb_", database=0, retry_mechanism=retry
+        )
+
+        await inst.run()
+
+        # Check that the listener attempted to reconnect
+        self.assertEqual(self.channel.psubscribe.await_count, 3)
+        self.channel.psubscribe.assert_awaited_with("__keyspace@0__:slb_*")
