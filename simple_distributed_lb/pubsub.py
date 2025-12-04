@@ -85,7 +85,30 @@ class RedisKeyspaceListener:
         self.channel = None
         self.listener = None
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.retry_mechanism = retry_mechanism or RetryMechanism()
+        # Use infinite retries with 60-second max backoff for persistent reconnection
+        self.retry_mechanism = retry_mechanism or RetryMechanism(max_retries=float("inf"), min_wait=1, max_wait=60)
+        self._connected = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if Redis connection is active."""
+        return self._connected
+
+    def _set_connected(self, connected: bool) -> None:
+        """
+        Update connection state and log changes.
+
+        Provides operational visibility into Redis connection health by logging
+        state transitions. This enables monitoring and debugging of fail-open behavior.
+        """
+        previous = self._connected
+        self._connected = connected
+
+        # Log state transitions for operational visibility
+        if previous and not connected:
+            self.logger.warning("Redis connection lost - operating in fail-open mode")
+        elif not previous and connected:
+            self.logger.info("Redis connection restored")
 
     async def subscribe(self) -> asyncio.Task:
         if self.channel is None:
@@ -122,18 +145,40 @@ class RedisKeyspaceListener:
                 self.logger.exception("Unhandled error in callback")
 
     async def run(self):
-        """Main loop to run the listener"""
+        """
+        Main loop to run the listener with persistent reconnection.
+
+        Implements fail-open behavior: during Redis outages, the load balancer
+        continues routing traffic using cached targets while attempting to
+        reconnect in the background with exponential backoff (max 60 seconds).
+
+        The retry mechanism uses infinite retries, ensuring reconnection attempts
+        continue indefinitely during persistent Redis outages.
+        """
+        self.logger.info("Starting Redis keyspace listener with persistent reconnection")
+
         for attempt_delay in self.retry_mechanism:
             try:
                 await self.subscribe()
+                self._set_connected(True)
+                self.logger.info("Redis keyspace subscription established")
                 await self._listen()
             except (aioredis.ConnectionError, aioredis.TimeoutError) as e:
-                self.logger.warning("Redis connection error: %s. Reconnecting in %s", e, attempt_delay)
+                self._set_connected(False)
+                self.logger.error("Redis connection error: %s. Retrying in %s seconds", e, attempt_delay)
                 await asyncio.sleep(attempt_delay)
             except asyncio.CancelledError:
-                self.logger.debug("main loop cancelled")
-            except (StopAsyncIteration, RuntimeError):
-                self.logger.info("no more messages?")
+                self._set_connected(False)
+                self.logger.debug("Redis listener task cancelled")
+                break
+            except (StopAsyncIteration, RuntimeError) as e:
+                self._set_connected(False)
+                self.logger.warning("Redis listener stopped unexpectedly: %s. Retrying in %s seconds", e, attempt_delay)
+                await asyncio.sleep(attempt_delay)
+            except Exception as e:
+                self._set_connected(False)
+                self.logger.error("Unexpected error in Redis listener: %s. Retrying in %s seconds", e, attempt_delay)
+                await asyncio.sleep(attempt_delay)
             finally:
                 await self.aclose()
 

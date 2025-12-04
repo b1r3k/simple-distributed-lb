@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sys
 from functools import reduce
@@ -45,6 +46,7 @@ http_client = None
 lb_targets: RoundRobinTargets | None = None
 redis_client = None
 redis_keyspace: RedisKeyspaceListener | None = None
+redis_task = None
 
 
 def get_sanitized_headers(headers) -> MutableHeaders:
@@ -100,8 +102,26 @@ async def handle_registration(req: Request) -> Response:
 
 
 async def healthcheck(_: Request) -> Response:
-    logger.debug("Healthcheck OK")
-    return Response(status_code=200, content="OK")
+    """
+    Health check endpoint with Redis connection status.
+
+    Returns 200 even if Redis is down (fail-open behavior).
+    Includes redis_connected field for monitoring systems to detect outages.
+    """
+    global redis_keyspace
+
+    redis_connected = False
+    if redis_keyspace is not None:
+        redis_connected = redis_keyspace.is_connected
+
+    response_data = {
+        "status": "ok",
+        "redis_connected": redis_connected,
+        "mode": "normal" if redis_connected else "fail-open",
+    }
+
+    logger.debug("Healthcheck: %s", response_data)
+    return JSONResponse(content=response_data, status_code=200)
 
 
 async def get_target_stats(_: Request) -> Response:
@@ -125,21 +145,45 @@ async def get_target_stats(_: Request) -> Response:
     return JSONResponse(content=stats)
 
 
-async def handle_registration_notification(_: PubSubMessage | None = None):
+async def handle_registration_notification(message: PubSubMessage | None = None):
+    """
+    Handle registration notification from Redis keyspace events.
+    Syncs all targets from Redis into local memory.
+
+    When called at startup (message=None), failures propagate to prevent startup.
+    When called at runtime (message=PubSubMessage), failures are logged but don't crash
+    the service - the load balancer continues with cached targets (fail-open behavior).
+    """
     global lb_targets
     global redis_client
     global redis_keyspace
 
-    main_key = f"{redis_keyspace.key_pattern}paths"
-    active_paths = await redis_client.smembers(main_key)
-    for path in map(lambda p: p.decode(), active_paths):
-        path_key = f"{redis_keyspace.key_pattern}{path}"
-        targets = await redis_client.smembers(path_key)
-        for target in map(lambda t: t.decode(), targets):
-            host, port = target.split(":")
-            target = Host(ip_address=host, port=int(port))
-            if lb_targets.add(path, target):
-                logger.info("Registered target: %s on path: %s", target, path)
+    # Runtime callback: wrap Redis operations in try/except for fail-open behavior
+    is_runtime_callback = message is not None
+
+    try:
+        main_key = f"{redis_keyspace.key_pattern}paths"
+        active_paths = await redis_client.smembers(main_key)
+        for path in map(lambda p: p.decode(), active_paths):
+            path_key = f"{redis_keyspace.key_pattern}{path}"
+            targets = await redis_client.smembers(path_key)
+            for target in map(lambda t: t.decode(), targets):
+                host, port = target.split(":")
+                target = Host(ip_address=host, port=int(port))
+                if lb_targets.add(path, target):
+                    logger.info("Registered target: %s on path: %s", target, path)
+    except Exception as e:
+        if is_runtime_callback:
+            # Runtime failure: log and continue with cached targets (fail-open)
+            logger.warning(
+                "Failed to sync targets from Redis during runtime: %s. "
+                "Continuing with cached targets (fail-open mode).",
+                e,
+            )
+        else:
+            # Startup failure: propagate to prevent startup with invalid state
+            logger.error("Failed to sync targets from Redis at startup: %s", e)
+            raise
 
 
 async def handle_proxy(request: Request):
@@ -169,6 +213,7 @@ async def app_startup():
     global lb_targets
     global redis_client
     global redis_keyspace
+    global redis_task
 
     limits = httpx.Limits(max_keepalive_connections=100, max_connections=1000)
     timeout = httpx.Timeout(None, connect=5)
@@ -178,10 +223,17 @@ async def app_startup():
     redis_keyspace = RedisKeyspaceListener(
         redis_client, callbacks={RedisKeyspaceCommand.SADD: handle_registration_notification}
     )
-    await redis_keyspace.subscribe()
-    # initialize for the first time since keyspace notifications are not triggered if redis operation did not modify
-    # value for given key
+
+    # Start background task with persistent reconnection
+    # This task runs indefinitely with exponential backoff, ensuring the load balancer
+    # maintains "fail-open" behavior during Redis outages
+    redis_task = asyncio.create_task(redis_keyspace.run(), name="redis_keyspace_listener")
+
+    # Initial sync from Redis (required at startup - will fail if Redis unavailable)
+    # Note: Startup failures are handled by orchestration layer (systemd/k8s)
+    # Runtime failures are handled by the background task with persistent reconnection
     await handle_registration_notification()
+    logger.info("Load balancer startup complete")
 
 
 async def app_shutdown():
@@ -189,10 +241,26 @@ async def app_shutdown():
     global lb_targets
     global redis_client
     global redis_keyspace
+    global redis_task
 
+    logger.info("Shutting down load balancer...")
+
+    # Cancel Redis listener task
+    if redis_task is not None:
+        redis_task.cancel()
+        try:
+            await redis_task
+        except asyncio.CancelledError:
+            logger.info("Redis keyspace listener task cancelled")
+        except Exception as e:
+            logger.warning("Error while cancelling Redis task: %s", e)
+
+    # Close connections
     await http_client.aclose()
     await redis_keyspace.aclose()
     await teardown_redis(redis_client)
+
+    logger.info("Shutdown complete")
 
 
 async def handle_error(_: Request, exc: HTTPException) -> Response:

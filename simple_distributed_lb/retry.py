@@ -2,7 +2,13 @@ from typing import Callable
 
 
 class RetryMechanism:
-    """Iterable retry mechanism"""
+    """
+    Iterable retry mechanism with exponential backoff.
+
+    Supports both limited and infinite retry attempts for different use cases:
+    - Limited retries (max_retries > 0): Suitable for transient errors
+    - Infinite retries (max_retries = float('inf')): Suitable for persistent reconnection
+    """
 
     def __init__(
         self,
