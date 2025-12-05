@@ -1,6 +1,6 @@
 # simple distributed load balancer
 
-companion repository for blog post:
+This is companion repository for blog post: [Scaling the Load Balancer: from single process to distributed state with redis](https://blog.jachym.dev/python/asyncio/exercise/distributed%20system/2025/12/04/simple-load-balancer-distributed-state.html)
 
 ## Problem description
 
