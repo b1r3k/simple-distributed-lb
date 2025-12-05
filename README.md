@@ -21,13 +21,13 @@ When a client calls http://<load balancer>/test, the request will be forwarded t
 
 ## Howto
 
-### Run
+### Run demo
 
-1. Make sure you have poetry installed and pyenv wouldn't hurt too
-2. Install dependencies: `make install`
-3. Start async based solution: `make run-async`
+Demo is build with docker compose. Demo setup contains DNS server, redis server, two load balancers and two upstream servers. When a upstream server starts, it registers itself to load balancer using `e2e-upstream.sh` script. When both upstream servers are started, e2e tests are executed using `e2e-test.sh` script which sends requests to load balancer and checks if requests are served according to round-robin scheme.
 
-### Test
+    $ docker compose up
+
+### Use API
 
 1. Register target
 
