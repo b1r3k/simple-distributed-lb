@@ -19,14 +19,24 @@ RUN addgroup $GROUP && adduser \
     --uid 1000 \
     $USER
 
-WORKDIR /app
-RUN chmod -R 777 /app
-# helps speed up docker compose run but requires a rebuild if the requirements change
-COPY ./requirements-dev.txt /app
-
 EXPOSE $APP_PORT
+WORKDIR /app
+
+RUN pip3 install -U pip>=23.1.2 poetry
+
+# Install dependencies only (cached layer - only rebuilds when poetry.lock changes)
+COPY pyproject.toml poetry.lock README.md ./
+RUN --mount=type=ssh poetry install --no-root
+
+# Copy source code (invalidates on every code change)
+ADD . /app
+
+# Install the project package itself (fast, no dependency downloads)
+RUN poetry install --only-root
+
+# Fix ownership for unprivileged user
+RUN chown -R $USER:$GROUP /app
+
 USER $USER
 
-RUN python -m venv /app/.venv && . /app/.venv/bin/activate && pip install -r /app/requirements.txt
-
-CMD . /app/.venv/bin/activate && uvicorn --host 0.0.0.0 --port ${APP_PORT} --timeout-keep-alive 61 --lifespan on --factory simple_distributed_lb.starlette_based:create_app
+CMD poetry run uvicorn --host 0.0.0.0 --port ${APP_PORT} --timeout-keep-alive 61 --lifespan on --factory simple_distributed_lb.server:create_app
